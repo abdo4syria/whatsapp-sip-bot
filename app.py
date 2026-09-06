@@ -1,4 +1,4 @@
-import pjsua as pj
+import pjsua2 as pj
 import threading
 import queue
 import requests

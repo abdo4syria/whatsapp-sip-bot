@@ -1,4 +1,4 @@
-pjsua==0.5.5
+pjsua2==2.13
 SpeechRecognition==3.10.0
 requests==2.31.0
 flask==2.3.3
