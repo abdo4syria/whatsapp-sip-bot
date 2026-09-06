@@ -93,9 +93,10 @@ def process_recognized_text(text):
 
 def send_dtmf_digit(digit):
     global current_call
-    if current_call and current_call.is_valid():
+    if current_call:
         try:
-            current_call.dial_dtmf(digit)
+            call_op = pj.CallOpParam()
+            current_call.dialDtmf(digit)
             logger.info(f"DTMF sent: {digit}")
         except Exception as e:
             logger.error(f"DTMF error: {e}")
@@ -130,7 +131,9 @@ def capture_audio(call):
     global rec_file_path, last_read_frame, current_call
     rec_file_path = f"call_{int(time.time())}.wav"
     try:
-        call.rec_start(rec_file_path)
+        # استخدام rec_start من pjsua2
+        call_rec = pj.CallRecorder(rec_file_path)
+        call.startRecording(call_rec)
         logger.info("Recording started")
     except Exception as e:
         logger.error(f"Rec start error: {e}")
@@ -146,52 +149,66 @@ def capture_audio(call):
                     if data: audio_queue.put(data)
         except: pass
         time.sleep(CHUNK_DURATION)
-    try: call.rec_stop()
+    try:
+        call.stopRecording(call_rec)
     except: pass
     try:
         if os.path.exists(rec_file_path): os.remove(rec_file_path)
     except: pass
 
-class MyCallCallback(pj.CallCallback):
-    def on_state(self):
+class MyAccount(pj.Account):
+    def on_incoming_call(self, prm):
         global current_call
-        if self.call.info().state == pj.CallState.DISCONNECTED:
+        try:
+            call = pj.Call(self, prm.callId)
+            call_prm = pj.CallOpParam()
+            call_prm.statusCode = 200
+            call.answer(call_prm)
+            current_call = call
+            logger.info("Answered incoming call")
+        except Exception as e:
+            logger.error(f"Failed to answer: {e}")
+
+class MyCall(pj.Call):
+    def __init__(self, acc, call_id):
+        pj.Call.__init__(self, acc, call_id)
+    def on_call_state(self, prm):
+        global current_call
+        if self.info().state == pj.PJSIP_INV_STATE_DISCONNECTED:
+            logger.info("Call disconnected")
             current_call = None
-    def on_media_state(self):
+    def on_call_media_state(self, prm):
         global current_call, recording_thread
-        if self.call.info().media_state == pj.MediaState.ACTIVE:
-            current_call = self.call
-            recording_thread = threading.Thread(target=capture_audio, args=(self.call,))
+        if self.info().mediaState == pj.PJSUA_CALL_MEDIA_ACTIVE:
+            current_call = self
+            logger.info("Media active, starting capture")
+            recording_thread = threading.Thread(target=capture_audio, args=(self,))
             recording_thread.daemon = True
             recording_thread.start()
 
-def log_cb(level, str, len):
-    logger.info(f"[PJSIP] {str}")
-
-def create_account(lib):
+def create_account():
     acc_cfg = pj.AccountConfig()
-    acc_cfg.id = f"sip:{SIP_USER}@{SIP_DOMAIN}"
-    acc_cfg.reg_uri = f"sip:{SIP_DOMAIN}"
-    acc_cfg.auth_cred = [pj.AuthCred("*", SIP_USER, SIP_PASSWORD)]
-    lib.create_account(acc_cfg)
+    acc_cfg.idUri = f"sip:{SIP_USER}@{SIP_DOMAIN}"
+    acc_cfg.regConfig.registrarUri = f"sip:{SIP_DOMAIN}"
+    cred = pj.AuthCredInfo("digest", "*", SIP_USER, 0, SIP_PASSWORD)
+    acc_cfg.sipConfig.authCreds.append(cred)
+    acc = MyAccount()
+    acc.create(acc_cfg)
     logger.info(f"Account registered: {SIP_USER}")
 
 def sip_main():
     global current_call
-    lib = None
-    try:
-        lib = pj.Lib()
-        lib.init(log_cfg=pj.LogConfig(level=3, callback=log_cb))
-        lib.create_transport(pj.TransportType.UDP, pj.TransportConfig(0))
-        lib.start()
-        create_account(lib)
-        threading.Thread(target=audio_processing_loop, daemon=True).start()
-        send_telegram("🤖 تم تشغيل نظام استقبال مكالمات واتساب تلقائيًا")
-        while True:
-            time.sleep(1)
-    except Exception as e:
-        logger.error(f"SIP error: {e}")
-        if lib: lib.destroy()
+    ep_cfg = pj.EpConfig()
+    ep = pj.Endpoint()
+    ep.libCreate()
+    ep.libInit(ep_cfg)
+    ep.libStart()
+    create_account()
+    threading.Thread(target=audio_processing_loop, daemon=True).start()
+    send_telegram("🤖 تم تشغيل نظام استقبال مكالمات واتساب تلقائيًا")
+    while True:
+        ep.libHandleEvents(100)
+        time.sleep(0.01)
 
 @app.route('/')
 def home(): return "WhatsApp SIP Bot is running."
