@@ -15,7 +15,9 @@ RUN wget https://github.com/pjsip/pjproject/archive/refs/tags/2.13.tar.gz && \
     tar xzf 2.13.tar.gz && \
     cd pjproject-2.13 && \
     ./configure --disable-samples --disable-video --disable-sound --disable-oss --disable-alsa --disable-libyuv --disable-opencore-amr && \
-    make dep && make -j$(nproc) && make install && make install-python && \
+    make dep && make -j$(nproc) && make install && \
+    cd pjsip-apps/src/swig/python && \
+    make && make install && \
     ldconfig
 
 WORKDIR /app
