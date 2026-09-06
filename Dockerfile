@@ -1,4 +1,4 @@
-FROM python:3.8-slim
+FROM python:3.8-buster
 
 RUN apt-get update && apt-get install -y \
     build-essential \
@@ -13,13 +13,12 @@ RUN apt-get update && apt-get install -y \
     wget \
     && rm -rf /var/lib/apt/lists/*
 
-# بناء pjproject من المصدر (مطلوب لـ pjsua)
 WORKDIR /tmp
 RUN wget https://github.com/pjsip/pjproject/archive/refs/tags/2.13.tar.gz && \
     tar xzf 2.13.tar.gz && \
     cd pjproject-2.13 && \
-    ./configure --disable-video --disable-sound --disable-opencore-amr --disable-oss --disable-alsa --disable-libyuv && \
-    make dep && make && make install && \
+    ./configure --disable-samples --disable-video --disable-sound --disable-oss --disable-alsa --disable-libyuv --disable-opencore-amr && \
+    make dep && make -j$(nproc) && make install && \
     ldconfig
 
 WORKDIR /app
