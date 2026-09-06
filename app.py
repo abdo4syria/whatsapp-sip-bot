@@ -204,7 +204,7 @@ def sip_main():
     # إنشاء نقل UDP بشكل صريح قبل إضافة الحساب
     udp_cfg = pj.TransportConfig()
     udp_cfg.port = 0  # أي منفذ متاح
-    endpoint.transportCreate(pj.PJSIP_TRANSPORT_UDP, udp_cfg)
+    endpoint.transportCreate(pj.PJSIP_TRANSPORT_TCP, udp_cfg)
     logger.info("UDP transport created")
     endpoint.libStart()
     create_account()
