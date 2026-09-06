@@ -1,0 +1,204 @@
+import pjsua as pj
+import threading
+import queue
+import requests
+import time
+import re
+import os
+import logging
+import io
+import wave
+import speech_recognition as sr
+from flask import Flask, jsonify
+
+SIP_USER = os.environ.get('SIP_USER', 'sp4')
+SIP_PASSWORD = os.environ.get('SIP_PASSWORD', 'sp4sp4')
+SIP_DOMAIN = os.environ.get('SIP_DOMAIN', 'sip.linphone.org')
+TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN', '8530962776:AAEN_0Qdtxtuhyd3sFtbkaleAZ6aNXePrkE')
+TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', '-1003593316438')
+SAMPLE_RATE = 16000
+LANGUAGE = 'en-US'
+CHUNK_DURATION = 0.5
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
+app = Flask(__name__)
+audio_queue = queue.Queue()
+current_call = None
+recording_thread = None
+rec_file_path = None
+last_read_frame = 0
+processed_codes = set()
+
+def send_telegram(text):
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    try:
+        r = requests.post(url, json={'chat_id': TELEGRAM_CHAT_ID, 'text': text}, timeout=10)
+        if r.status_code == 200:
+            logger.info(f"✅ Sent: {text}")
+            return True
+        return False
+    except Exception as e:
+        logger.error(f"Telegram error: {e}")
+        return False
+
+def word_to_digit(text):
+    mapping = {
+        "zero":"0","one":"1","two":"2","three":"3","four":"4","five":"5","six":"6","seven":"7","eight":"8","nine":"9",
+        "صفر":"0","واحد":"1","اثنان":"2","اثنين":"2","ثلاثة":"3","ثلاثه":"3","اربعة":"4","أربعة":"4","خمسة":"5","خمسه":"5",
+        "ستة":"6","سته":"6","سبعة":"7","سبعه":"7","ثمانية":"8","ثمانيه":"8","تسعة":"9","تسعه":"9"
+    }
+    return mapping.get(text.lower(), None)
+
+def extract_single_digit(text):
+    m = re.search(r'(?:press|اضغط)\s+(?:on\s+)?(\d)', text, re.IGNORECASE)
+    if m: return m.group(1)
+    m = re.search(r'(?:press|اضغط)\s+(?:on\s+)?([a-zA-Z]+|[\u0600-\u06FF]+)', text, re.IGNORECASE)
+    if m:
+        d = word_to_digit(m.group(1))
+        if d: return d
+    return None
+
+def extract_verification_code(text):
+    patterns = [
+        r'(?:رمز تحقيقك هو|your verification code is|رمز التحقق|verification code|code is)\s*[:\-]?\s*(\d{6})',
+        r'(?:رمز تحقيقك هو|your verification code is|رمز التحقق|verification code|code is)\s*[:\-]?\s*(\d[\s\-]?\d[\s\-]?\d[\s\-]?\d[\s\-]?\d[\s\-]?\d)',
+    ]
+    for p in patterns:
+        m = re.search(p, text, re.IGNORECASE)
+        if m:
+            code = re.sub(r'\D','',m.group(1))
+            if len(code)==6: return code
+    m = re.search(r'\b\d{6}\b', text)
+    if m: return m.group(0)
+    m = re.search(r'\b(\d[\s\-]?){6}\b', text)
+    if m:
+        code = re.sub(r'\D','',m.group(0))
+        if len(code)==6: return code
+    return None
+
+def process_recognized_text(text):
+    text = text.lower().strip()
+    if not text: return
+    logger.info(f"Recognized: {text}")
+    digit = extract_single_digit(text)
+    if digit:
+        logger.info(f"Sending DTMF {digit}")
+        send_dtmf_digit(digit)
+    code = extract_verification_code(text)
+    if code and code not in processed_codes:
+        processed_codes.add(code)
+        send_telegram(f"✅ كود تحقق واتساب: {code}")
+
+def send_dtmf_digit(digit):
+    global current_call
+    if current_call and current_call.is_valid():
+        try:
+            current_call.dial_dtmf(digit)
+            logger.info(f"DTMF sent: {digit}")
+        except Exception as e:
+            logger.error(f"DTMF error: {e}")
+
+def audio_processing_loop():
+    recognizer = sr.Recognizer()
+    recognizer.energy_threshold = 300
+    recognizer.dynamic_energy_threshold = True
+    recognizer.pause_threshold = 0.5
+    while True:
+        try:
+            pcm = audio_queue.get(timeout=0.5)
+        except queue.Empty:
+            continue
+        buf = io.BytesIO()
+        with wave.open(buf,'wb') as wf:
+            wf.setnchannels(1); wf.setsampwidth(2); wf.setframerate(SAMPLE_RATE)
+            wf.writeframes(pcm)
+        buf.seek(0)
+        try:
+            with sr.AudioFile(buf) as source:
+                audio = recognizer.record(source)
+            text = recognizer.recognize_google(audio, language=LANGUAGE)
+            if text:
+                process_recognized_text(text)
+        except sr.UnknownValueError:
+            pass
+        except Exception as e:
+            logger.error(f"STT error: {e}")
+
+def capture_audio(call):
+    global rec_file_path, last_read_frame, current_call
+    rec_file_path = f"call_{int(time.time())}.wav"
+    try:
+        call.rec_start(rec_file_path)
+        logger.info("Recording started")
+    except Exception as e:
+        logger.error(f"Rec start error: {e}")
+        return
+    last_read_frame = 0
+    while current_call and current_call.is_valid():
+        try:
+            if os.path.exists(rec_file_path):
+                with wave.open(rec_file_path,'rb') as wf:
+                    wf.setpos(last_read_frame)
+                    data = wf.readframes(int(SAMPLE_RATE*CHUNK_DURATION))
+                    last_read_frame = wf.tell()
+                    if data: audio_queue.put(data)
+        except: pass
+        time.sleep(CHUNK_DURATION)
+    try: call.rec_stop()
+    except: pass
+    try:
+        if os.path.exists(rec_file_path): os.remove(rec_file_path)
+    except: pass
+
+class MyCallCallback(pj.CallCallback):
+    def on_state(self):
+        global current_call
+        if self.call.info().state == pj.CallState.DISCONNECTED:
+            current_call = None
+    def on_media_state(self):
+        global current_call, recording_thread
+        if self.call.info().media_state == pj.MediaState.ACTIVE:
+            current_call = self.call
+            recording_thread = threading.Thread(target=capture_audio, args=(self.call,))
+            recording_thread.daemon = True
+            recording_thread.start()
+
+def log_cb(level, str, len):
+    logger.info(f"[PJSIP] {str}")
+
+def create_account(lib):
+    acc_cfg = pj.AccountConfig()
+    acc_cfg.id = f"sip:{SIP_USER}@{SIP_DOMAIN}"
+    acc_cfg.reg_uri = f"sip:{SIP_DOMAIN}"
+    acc_cfg.auth_cred = [pj.AuthCred("*", SIP_USER, SIP_PASSWORD)]
+    lib.create_account(acc_cfg)
+    logger.info(f"Account registered: {SIP_USER}")
+
+def sip_main():
+    global current_call
+    lib = None
+    try:
+        lib = pj.Lib()
+        lib.init(log_cfg=pj.LogConfig(level=3, callback=log_cb))
+        lib.create_transport(pj.TransportType.UDP, pj.TransportConfig(0))
+        lib.start()
+        create_account(lib)
+        threading.Thread(target=audio_processing_loop, daemon=True).start()
+        send_telegram("🤖 تم تشغيل نظام استقبال مكالمات واتساب تلقائيًا")
+        while True:
+            time.sleep(1)
+    except Exception as e:
+        logger.error(f"SIP error: {e}")
+        if lib: lib.destroy()
+
+@app.route('/')
+def home(): return "WhatsApp SIP Bot is running."
+@app.route('/health')
+def health(): return jsonify({'status':'healthy'})
+
+if __name__ == "__main__":
+    threading.Thread(target=sip_main, daemon=True).start()
+    port = int(os.environ.get('PORT', 10000))
+    app.run(host='0.0.0.0', port=port)
