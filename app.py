@@ -30,6 +30,7 @@ recording_thread = None
 rec_file_path = None
 last_read_frame = 0
 processed_codes = set()
+endpoint = None
 
 def send_telegram(text):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
@@ -95,7 +96,6 @@ def send_dtmf_digit(digit):
     global current_call
     if current_call:
         try:
-            call_op = pj.CallOpParam()
             current_call.dialDtmf(digit)
             logger.info(f"DTMF sent: {digit}")
         except Exception as e:
@@ -130,10 +130,9 @@ def audio_processing_loop():
 def capture_audio(call):
     global rec_file_path, last_read_frame, current_call
     rec_file_path = f"call_{int(time.time())}.wav"
+    recorder = pj.CallRecorder(rec_file_path)
     try:
-        # استخدام rec_start من pjsua2
-        call_rec = pj.CallRecorder(rec_file_path)
-        call.startRecording(call_rec)
+        call.startRecording(recorder)
         logger.info("Recording started")
     except Exception as e:
         logger.error(f"Rec start error: {e}")
@@ -150,7 +149,7 @@ def capture_audio(call):
         except: pass
         time.sleep(CHUNK_DURATION)
     try:
-        call.stopRecording(call_rec)
+        call.stopRecording(recorder)
     except: pass
     try:
         if os.path.exists(rec_file_path): os.remove(rec_file_path)
@@ -160,7 +159,7 @@ class MyAccount(pj.Account):
     def on_incoming_call(self, prm):
         global current_call
         try:
-            call = pj.Call(self, prm.callId)
+            call = MyCall(self, prm.callId)
             call_prm = pj.CallOpParam()
             call_prm.statusCode = 200
             call.answer(call_prm)
@@ -197,17 +196,22 @@ def create_account():
     logger.info(f"Account registered: {SIP_USER}")
 
 def sip_main():
-    global current_call
+    global endpoint
     ep_cfg = pj.EpConfig()
-    ep = pj.Endpoint()
-    ep.libCreate()
-    ep.libInit(ep_cfg)
-    ep.libStart()
+    endpoint = pj.Endpoint()
+    endpoint.libCreate()
+    endpoint.libInit(ep_cfg)
+    # إنشاء نقل UDP بشكل صريح قبل إضافة الحساب
+    udp_cfg = pj.TransportConfig()
+    udp_cfg.port = 0  # أي منفذ متاح
+    endpoint.transportCreate(pj.PJSIP_TRANSPORT_UDP, udp_cfg)
+    logger.info("UDP transport created")
+    endpoint.libStart()
     create_account()
     threading.Thread(target=audio_processing_loop, daemon=True).start()
     send_telegram("🤖 تم تشغيل نظام استقبال مكالمات واتساب تلقائيًا")
     while True:
-        ep.libHandleEvents(100)
+        endpoint.libHandleEvents(100)
         time.sleep(0.01)
 
 @app.route('/')
