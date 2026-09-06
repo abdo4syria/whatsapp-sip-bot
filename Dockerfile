@@ -1,25 +1,13 @@
-FROM python:3.8-buster
+FROM python:3.8-slim-bullseye
 
-RUN apt-get update && apt-get install -y \
+RUN apt-get update && apt-get install -y --fix-missing \
     build-essential \
     python3-dev \
     libasound2-dev \
     libssl-dev \
-    libsrtp2-dev \
-    libavcodec-dev \
-    libavformat-dev \
-    libswscale-dev \
-    libv4l-dev \
+    pkg-config \
     wget \
     && rm -rf /var/lib/apt/lists/*
-
-WORKDIR /tmp
-RUN wget https://github.com/pjsip/pjproject/archive/refs/tags/2.13.tar.gz && \
-    tar xzf 2.13.tar.gz && \
-    cd pjproject-2.13 && \
-    ./configure --disable-samples --disable-video --disable-sound --disable-oss --disable-alsa --disable-libyuv --disable-opencore-amr && \
-    make dep && make -j$(nproc) && make install && \
-    ldconfig
 
 WORKDIR /app
 
